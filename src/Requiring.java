@@ -1,5 +1,5 @@
 /*
- * Requiring.java     0.1     22/12/29
+ * Requiring.java     0.2     22/12/29
  * No copyright license
  */
 
@@ -7,6 +7,7 @@ import org.jetbrains.annotations.Contract;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -20,7 +21,8 @@ import java.util.stream.Stream;
  * Creates file containing content of all files in the given directory (root) <p>
  * Each file in the directory may contain lines in the format {Require "PATH"}.
  * PATH is a path from the root directory, using '/' as separator between folders.
- * In the output each file's content must be written below all files it requires. <p>
+ * In the output each file's content must be written below all files it requires.
+ * Output file is located in the given directory and named "Output.txt". <p>
  * Requires files in UTF-8 encoding.
  *
  * @author Maxim Bushmakov
@@ -45,6 +47,7 @@ public class Requiring {
      * While writing also checking for loop.
      *
      * @param args if args is not null args[0] is the path to the root directory
+     * @throws IOException if given directory is incorrect or one of files cannot be opened
      * @see Requiring
      */
     public static void main(final String @NotNull [] args) throws IOException {
@@ -61,31 +64,62 @@ public class Requiring {
             throw new IOException("Invalid directory");
         }
 
+        Path rootPath = Path.of(root);
+        final File outputFile = rootPath.resolve("Output.txt").toFile();
+        try (var writer = new FileWriter(outputFile, false)) {
+            writer.write("");
+        }
+
         final int filesNum = getFilesNum(rootFile);
 
         /* Map from file path to its FILE_STATE */
         var states = new HashMap<String, FILE_STATE>(2 * filesNum);
 
-        /* store all file paths to states */
-        // using Files is a very interesting way to slow down the program
-        Path rootPath = Path.of(root);
-        try (final Stream<Path> files = Files.walk(rootPath)) {
-            for (final Object file : files.toArray()) {
-                if (((Path) file).toFile().isFile()) {
-                    for (final String path : getRequires((Path) file)) {
-                        states.put(path, FILE_STATE.DEPENDENT);
-                    }
-                    // stores relative paths
-                    states.putIfAbsent(String.valueOf(((Path) file).relativize(rootPath)), FILE_STATE.FREE);
+        /* before processing phase
+        this code won't parallelize in a good way, all blocks at states
+        it throws RuntimeException with IOException as cause to rethrow it later */
+        try (final Stream<Path> directories = Files.walk(rootPath)) {
+            directories.filter(directory -> directory.toFile().isFile()).forEach(curPath -> {
+
+                final Iterable<String> requiredPaths;
+                try {
+                    requiredPaths = getRequires(curPath);
+                } catch (IOException e) {
+                    throw new RuntimeException("", new IOException("Can't open file " + curPath));
                 }
+
+                for (String path : requiredPaths) {
+                    Path pathAbs = rootPath.resolve(Path.of(path));
+                    if (pathAbs.toFile().isFile()) {
+                        states.put(path, FILE_STATE.DEPENDENT);
+                    } else {
+                        throw new RuntimeException("", new IOException("Can't find file " + pathAbs + " required in file " + curPath));
+                    }
+                }
+
+                // stores relative paths
+                states.putIfAbsent(String.valueOf(rootPath.relativize(curPath)), FILE_STATE.FREE);
+            });
+        } catch (RuntimeException e) {
+            if (e.getCause().getClass() == IOException.class) {
+                throw (IOException) e.getCause();
+            } else {
+                throw e;
             }
         }
 
-        // create stack for files' numbers
-        // put free files in stack
-        // if there is no files find loop
-        // else (go through, check for loop, write file) while stack is not empty
+        /* processing phase */
+        for (var entry : states.entrySet()) {
+            if (entry.getValue() == FILE_STATE.FREE) {
+                writeOut(rootPath.resolve(Path.of(entry.getKey())).normalize(), outputFile);
+            }
+        }
 
+        for (var entry : states.entrySet()) {
+            if (entry.getValue() != FILE_STATE.WRITTEN) {
+                // Huston, we have problems
+            }
+        }
     }
 
     /**
@@ -93,12 +127,21 @@ public class Requiring {
      *
      * @param cur path to the directory (root)
      * @return number of files in the directory (including those in nested folders)
+     * @throws IOException if given invalid directory or in case of I/O errors
      */
     @Contract(pure = true)
-    private static int getFilesNum(final @NotNull File cur) {
+    private static int getFilesNum(final @NotNull File cur) throws IOException {
+        File[] directories = cur.listFiles();
+        if (directories == null) {
+            throw new IOException("Can't open directory " + cur);
+        }
+
+        if (directories.length == 0) {
+            return 0;
+        }
+
         int filesNum = 0;
-        // as far as path is not null, path.listFiles() is not null too
-        for (final File next : cur.listFiles()) {
+        for (final File next : directories) {
             if (next.isDirectory()) {
                 filesNum += getFilesNum(next);
             } else {
@@ -127,5 +170,9 @@ public class Requiring {
             });
         }
         return requires;
+    }
+
+    private static void writeOut(final @NotNull Path path, final @NotNull File outputFile) {
+
     }
 }
