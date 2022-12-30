@@ -1,10 +1,11 @@
 /*
- * Requiring.java     0.2     22/12/29
+ * Requiring.java     1.0     22/12/30
  * No copyright license
  */
 
 import org.jetbrains.annotations.Contract;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.File;
 import java.io.FileWriter;
@@ -22,15 +23,18 @@ import java.util.stream.Stream;
  * Each file in the directory may contain lines in the format {Require "PATH"}.
  * PATH is a path from the root directory, using '/' as separator between folders.
  * In the output each file's content must be written below all files it requires.
- * Output file is located in the given directory and named "Output.txt". <p>
+ * Output file is located at "<code>../Output.txt</code>". <p>
  * Requires files in UTF-8 encoding.
  *
  * @author Maxim Bushmakov
  */
-// TODO main
 public class Requiring {
-    // TODO comment
-    /* Class impl comment */
+    /* Method main finds number of files to set size of states
+     *  Then finds from which files chains of requires are started
+     *  Then it writes files' content in order using method writeOut
+     *  If there are chains without root (no FREE state file) there is a loop, so it can be found with writeOut
+     *  If there is a loop its members are printed and written data is deleted
+     *  writeOut method uses static members states and rootPath what mean high coupling and should be refactored */
 
     /**
      * FREE - file is not required anywhere (before processing) <p>
@@ -39,6 +43,14 @@ public class Requiring {
      * WRITTEN - file is already written to output (after processing)
      */
     private enum FILE_STATE {FREE, DEPENDENT, IN_PROCESS, WRITTEN}
+
+    /**
+     * Map from file path to its FILE_STATE
+     */
+    private static HashMap<Path, FILE_STATE> states;
+
+    /* Required to get absolute path from path relative to the root directory */
+    private static Path rootPath;
 
     /**
      * Uses DFS-like algorithm for oriented graph of files (require statement is edge)
@@ -59,46 +71,43 @@ public class Requiring {
             root = args[0];
         }
 
+        rootPath = Path.of(root);
+
         final File rootFile = new File(root);
         if (!rootFile.exists()) {
             throw new IOException("Invalid directory");
         }
 
-        Path rootPath = Path.of(root);
-        final File outputFile = rootPath.resolve("Output.txt").toFile();
-        try (var writer = new FileWriter(outputFile, false)) {
-            writer.write("");
-        }
-
         final int filesNum = getFilesNum(rootFile);
 
-        /* Map from file path to its FILE_STATE */
-        var states = new HashMap<String, FILE_STATE>(2 * filesNum);
+        states = new HashMap<>(2 * filesNum);
 
         /* before processing phase
-        this code won't parallelize in a good way, all blocks at states
+        this code won't be parallelized in a good way, all blocks at states
         it throws RuntimeException with IOException as cause to rethrow it later */
         try (final Stream<Path> directories = Files.walk(rootPath)) {
             directories.filter(directory -> directory.toFile().isFile()).forEach(curPath -> {
 
-                final Iterable<String> requiredPaths;
+                final Iterable<Path> requiredPaths;
                 try {
                     requiredPaths = getRequires(curPath);
                 } catch (IOException e) {
-                    throw new RuntimeException("", new IOException("Can't open file " + curPath));
+                    throw new RuntimeException("",
+                            new IOException("Can't open file " + curPath));
                 }
 
-                for (String path : requiredPaths) {
-                    Path pathAbs = rootPath.resolve(Path.of(path));
-                    if (pathAbs.toFile().isFile()) {
-                        states.put(path, FILE_STATE.DEPENDENT);
+                for (Path reqPath : requiredPaths) {
+                    Path reqPathAbs = rootPath.resolve(reqPath).normalize();
+                    if (reqPathAbs.toFile().isFile()) {
+                        states.put(reqPath, FILE_STATE.DEPENDENT);
                     } else {
-                        throw new RuntimeException("", new IOException("Can't find file " + pathAbs + " required in file " + curPath));
+                        throw new RuntimeException("",
+                                new IOException("Can't find file " + reqPath.normalize() + " required in file " + curPath));
                     }
                 }
 
                 // stores relative paths
-                states.putIfAbsent(String.valueOf(rootPath.relativize(curPath)), FILE_STATE.FREE);
+                states.putIfAbsent(rootPath.relativize(curPath).normalize(), FILE_STATE.FREE);
             });
         } catch (RuntimeException e) {
             if (e.getCause().getClass() == IOException.class) {
@@ -108,25 +117,65 @@ public class Requiring {
             }
         }
 
+        // create (or not) and get output file
+        File outputFile = rootPath.resolve("../Output.txt").toFile();
+        if (!outputFile.isFile()) {
+            Files.createFile(rootPath.resolve("../Output.txt"));
+        }
+
         /* processing phase */
-        for (var entry : states.entrySet()) {
-            if (entry.getValue() == FILE_STATE.FREE) {
-                writeOut(rootPath.resolve(Path.of(entry.getKey())).normalize(), outputFile);
+        // res contains result of writeOut
+        Path res = null;
+        try (var output = new FileWriter(outputFile, false)) {
+            for (final var entry : states.entrySet()) {
+                if (entry.getValue() == FILE_STATE.FREE) {
+                    res = writeOut(entry.getKey(), output);
+                    if (res != null) break;
+                }
             }
         }
 
-        for (var entry : states.entrySet()) {
-            if (entry.getValue() != FILE_STATE.WRITTEN) {
-                // Huston, we have problems
+        // check if all files been written
+        // if there are some that not - there must be a loop
+        if (res == null) {
+            try (var output = new FileWriter(outputFile, true)) {
+                for (var entry : states.entrySet()) {
+                    if (entry.getValue() != FILE_STATE.WRITTEN) {
+                        res = writeOut(entry.getKey(), output);
+                        if (res != null) break;
+                    }
+                }
+            }
+        }
+
+        if (res != null) {
+            System.out.println("Found loop in requires:");
+
+            Path cur = res;
+            do {
+                System.out.println(cur + " requires");
+                for (var entry : states.entrySet()) {
+                    if (entry.getValue() == FILE_STATE.IN_PROCESS) {
+                        cur = entry.getKey();
+                        break;
+                    }
+                }
+            } while (!cur.equals(res));
+            System.out.println(res);
+
+            // clear output file
+            try (var output = new FileWriter(outputFile, false)) {
+                output.write("");
             }
         }
     }
 
     /**
      * Calculates number of files in the directory
+     * (including those in nested folders)
      *
      * @param cur path to the directory (root)
-     * @return number of files in the directory (including those in nested folders)
+     * @return number of files in the directory
      * @throws IOException if given invalid directory or in case of I/O errors
      */
     @Contract(pure = true)
@@ -160,19 +209,52 @@ public class Requiring {
      * @throws IOException if file cannot be opened
      */
     @Contract(value = "_ -> new", pure = true)
-    private static @NotNull Iterable<String> getRequires(final @NotNull Path path) throws IOException {
-        var requires = new Vector<String>();
+    private static @NotNull Iterable<Path> getRequires(final @NotNull Path path) throws IOException {
+        var requires = new Vector<Path>();
         try (final Stream<String> stream = Files.lines(path)) {
             stream.forEach((line) -> {
                 if (line.startsWith("Require \"") && line.endsWith("\"")) {
-                    requires.add(line.substring(9, line.length() - 1));
+                    requires.add(Path.of(line.substring(9, line.length() - 1)));
                 }
             });
         }
         return requires;
     }
 
-    private static void writeOut(final @NotNull Path path, final @NotNull File outputFile) {
-
+    /**
+     * Writes all required files from the given file to output
+     * then writes given file's content to output. <p>
+     * Uses states so must be called after states is initialized.
+     * Uses deep first traversal. <p>
+     * If found loop returns false, loop vertices have IN_PROCESS state.
+     *
+     * @param path   path to the file
+     * @param output writer for output file
+     * @return path to file with error (one of vertices in loop)
+     * @throws IOException if I/O error occurs while writing
+     */
+    private static @Nullable Path writeOut(final @NotNull Path path, final @NotNull FileWriter output) throws IOException {
+        states.replace(path, FILE_STATE.IN_PROCESS);
+        for (Path next : getRequires(rootPath.resolve(path).normalize())) {
+            switch (states.get(next.normalize())) {
+                case IN_PROCESS -> {
+                    return path;
+                }
+                case WRITTEN -> {
+                    // do nothing
+                }
+                default -> {
+                    Path err = writeOut(next, output);
+                    if (err != null) {
+                        return err;
+                    }
+                }
+            }
+        }
+        // there must be more primitive way to copy file's content
+        output.write(Files.readString(rootPath.resolve(path).normalize()));
+        output.write("\n");
+        states.replace(path, FILE_STATE.WRITTEN);
+        return null;
     }
 }
