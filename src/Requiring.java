@@ -1,5 +1,5 @@
 /*
- * Requiring.java     1.0     22/12/30
+ * Requiring.java     1.1     22/12/30
  * No copyright license
  */
 
@@ -130,7 +130,9 @@ public class Requiring {
             for (final var entry : states.entrySet()) {
                 if (entry.getValue() == FILE_STATE.FREE) {
                     res = writeOut(entry.getKey(), output);
-                    if (res != null) break;
+                    if (res != null) {
+                        break;
+                    }
                 }
             }
         }
@@ -154,9 +156,9 @@ public class Requiring {
             Path cur = res;
             do {
                 System.out.println(cur + " requires");
-                for (var entry : states.entrySet()) {
-                    if (entry.getValue() == FILE_STATE.IN_PROCESS) {
-                        cur = entry.getKey();
+                for (Path next : getRequires(rootPath.resolve(cur).normalize())) {
+                    if (states.get(next) == FILE_STATE.IN_PROCESS) {
+                        cur = next;
                         break;
                     }
                 }
@@ -244,6 +246,7 @@ public class Requiring {
                     // do nothing
                 }
                 default -> {
+                    // cases FREE and DEPENDENT
                     Path err = writeOut(next, output);
                     if (err != null) {
                         return err;
